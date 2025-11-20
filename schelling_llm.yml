@@ -1,0 +1,17 @@
+name: schelling_llm
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - altair
+  - mesa
+  - jupyter
+  - jupyterlab
+  - numpy
+  - pip
+  - pytorch
+  - scikit-learn
+  - seaborn
+  - solara
+  - transformers
+prefix: /opt/homebrew/anaconda3/envs/schelling_llm
