@@ -1,16 +1,16 @@
 # ***********************************************************
-# Schelling Model with Embeddings (v2)
+# Schelling Model with Embeddings (v3)
 # ***********************************************************
 #
 # Update from v1: households described using sentence embeddings, not bespoke variables.
+# Update from v2: include wealth and neighbourhoods
 #
 # Created with (well, 'by' really!) ChatGPT.
-# For testing ideas. I've hardly checked the code so don't know if it's right.
 # Agents are described with hypothetical text descriptions that describe three features of
-# each household: structure, income and political beliefs.
-# These are converted to embeddings and then those embeddings are used to determine
-# whether agents are happy or not.
-
+# each household: structure, income and political beliefs. These are converted to embeddings.
+# Neighbourhood 'character' is calcualted as the mean of the constituent agent embeddings
+# Agent move decision based on the difference between their emedding and their neighbourhood
+# embedding.
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -46,23 +46,6 @@ class EmbeddingModel:
 
     def __init__(self, model_name="all-MiniLM-L6-v2"):
         self.model = SentenceTransformer(model_name)
-        #self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        #self.model = AutoModel.from_pretrained(model_name)
-        #self.model.eval()
-        #self.device = torch.device(self._choose_device())
-        #self.model.to(self.device)
-
-    def _choose_device(self):
-        """
-        Choose the most suitable device.
-        DEPRECATED: using SentenceTransformer now.
-        """
-        if torch.cuda.is_available():
-            return "cuda"
-        elif torch.backends.mps.is_available():
-            return "mps"
-        else:
-            return "cpu"
 
     def encode(self, sentences):
         embeddings = self.model.encode(sentences, convert_to_numpy=True)

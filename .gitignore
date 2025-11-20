@@ -2,3 +2,5 @@
 together.ai_key.txt
 
 .idea/
+__pycache__/
+.DS_Store
