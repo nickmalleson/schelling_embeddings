@@ -14,7 +14,7 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
-import torch
+import math
 import random
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.manifold import TSNE
@@ -58,11 +58,12 @@ class EmbeddingModel:
 
 class Agent:
     """Represents a household agent on the grid."""
-    def __init__(self, desc_idx, embedding, pos):
+    def __init__(self, desc_idx, embedding, pos, neighbourhood):
         self.desc_idx = desc_idx
         self.embedding = embedding
         self.pos = pos
         self.happy = False
+        self.neighbourhood = neighbourhood
 
 # -------------------------------
 # Schelling Model Class
@@ -72,9 +73,13 @@ class SchellingModel:
     """
     Implements an embedding-based version of the Schelling segregation model.
     Agents decide to move based on similarity of text-derived embeddings.
+    Neighbourhoods are radial sectors around the grid centre; each cell maps to one sector id.
     """
-    def __init__(self, descriptions, grid_size=20, num_agents=300, similarity_threshold=0.85, max_iters=20,
-                     color_method="tsne"):
+    def __init__(self, descriptions, grid_size=20, num_agents=300,
+                 similarity_threshold=0.85,
+                 max_iters=20,
+                 num_neighbourhoods=8,
+                 color_method="tsne"):
         # Descriptions of the generic households
         self.descriptions = descriptions
 
@@ -88,6 +93,14 @@ class SchellingModel:
         self.agents = []
         self.happy_counts = []
 
+        # Neighbourhood configuration
+        self.num_neighbourhoods = num_neighbourhoods
+        # Links between cells and neighbourhoods _init_neighbourhoods
+        self.cell_to_neighbourhood = {}
+        self.neighbourhood_cells = {i: [] for i in range(self.num_neighbourhoods)}
+        self.neighbourhood_agents = {i: set() for i in range(self.num_neighbourhoods)}
+        self._init_neighbourhoods()
+
         # Calculate the embeddings for the household descriptions
         self.embedding_model = EmbeddingModel()
         self.description_embeddings = self.embedding_model.encode(self.descriptions)
@@ -97,34 +110,8 @@ class SchellingModel:
         # ------------------------
         # COLOR MAPPING USING PCA or t-SNE (t-distributed Stochastic Neighbor Embedding)
         # ------------------------
-        self.color_method = color_method
-        if self.color_method == "tsne":
-            perplexity = min(5, len(self.description_embeddings) - 1)
-            self.tsne_map = TSNE(n_components=2, perplexity=perplexity, random_state=42).fit_transform(
-                self.description_embeddings
-            )
-            t_min = self.tsne_map.min(axis=0)
-            t_max = self.tsne_map.max(axis=0)
-            tsne_norm = (self.tsne_map - t_min) / (t_max - t_min + 1e-8)
-            self.rgb_map = []
-            for i in range(len(tsne_norm)):
-                hue = tsne_norm[i, 0]
-                saturation = 0.8
-                value = 0.9 - 0.4 * tsne_norm[i, 1]
-                color_rgb = mcolors.hsv_to_rgb((hue, saturation, value))
-                self.rgb_map.append(color_rgb)
-        else:
-            from sklearn.decomposition import PCA
-            pca = PCA(n_components=3)
-            pca_proj = pca.fit_transform(self.description_embeddings)
-            pca_min = pca_proj.min(axis=0)
-            pca_max = pca_proj.max(axis=0)
-            norm = (pca_proj - pca_min) / (pca_max - pca_min + 1e-8)
-            self.rgb_map = norm.tolist()
-
-
-        self.rgb_map = np.array(self.rgb_map)
-        self.desc_color_map = {i: self.rgb_map[i] for i in range(len(self.rgb_map))}
+        (self.rgb_map, self.desc_color_map) = SchellingModel._init_colours(
+            color_method, self.description_embeddings)
 
         # Initialize the grid with agents
         self._init_agents()
@@ -138,10 +125,44 @@ class SchellingModel:
             # Define the agent 'type' (from the descriptions)
             desc_idx = random.randint(0, len(self.descriptions) - 1)
             embedding = self.description_embeddings[desc_idx]
+            nid = self.get_neighbourhood(pos)
             # Create the agent
-            agent = Agent(desc_idx, embedding, pos)
+            agent = Agent(desc_idx, embedding, pos, nid)
+            # place on grid
             self.grid[pos] = agent
+            # add to neighbourhood agent list
+            self.neighbourhood_agents.setdefault(nid, set()).add(agent)
+
             self.agents.append(agent)
+
+    def _init_neighbourhoods(self):
+        """Partition the grid into `num_neighbourhoods` radial sectors around the grid centre."""
+        n = self.num_neighbourhoods
+        mid = (self.grid_size - 1) / 2.0
+        two_pi = 2 * math.pi
+        # assign each cell a sector id
+        for i in range(self.grid_size):
+            for j in range(self.grid_size):
+                # angle where rows (i) are y and cols (j) are x
+                angle = math.atan2(i - mid, j - mid)  # range [-pi, pi]
+                if angle < 0:
+                    angle += two_pi
+                sector = int(angle / (two_pi / n))
+                sector = min(sector, n - 1)
+                self.cell_to_neighbourhood[(i, j)] = sector
+                self.neighbourhood_cells.setdefault(sector, []).append((i, j))
+
+    def get_neighbourhood(self, pos):
+        """Return neighbourhood id for a given position tuple (i, j)."""
+        return self.cell_to_neighbourhood.get(pos)
+
+    def get_neighbourhood_cells(self, neighbourhood_id):
+        """Return list of positions in the neighbourhood."""
+        return list(self.neighbourhood_cells.get(neighbourhood_id, []))
+
+    def get_neighbourhood_agents(self, neighbourhood_id):
+        """Return list of Agent objects currently in the neighbourhood."""
+        return list(self.neighbourhood_agents.get(neighbourhood_id, set()))
 
     def _get_neighbours(self, pos):
         """Return non-empty neighbouring agents in the Moore neighbourhood."""
@@ -175,36 +196,75 @@ class SchellingModel:
         scaled = (rgb - self.rgb_map.min()) / (self.rgb_map.max() - self.rgb_map.min())
         return scaled
 
-    def plot_grid(self, iteration):
-        """Plot the current state of the grid with agent types shown by colour."""
+    @classmethod
+    def _init_colours(cls, color_method, description_embeddings):
+        """Initialize colour mapping for descriptions using t-SNE or PCA."""
+        if color_method == "tsne":
+            perplexity = min(5, len(description_embeddings) - 1)
+            tsne_map = TSNE(n_components=2, perplexity=perplexity, random_state=42).fit_transform(
+                description_embeddings
+            )
+            t_min = tsne_map.min(axis=0)
+            t_max = tsne_map.max(axis=0)
+            tsne_norm = (tsne_map - t_min) / (t_max - t_min + 1e-8)
+            rgb_map = []
+            for i in range(len(tsne_norm)):
+                hue = tsne_norm[i, 0]
+                saturation = 0.8
+                value = 0.9 - 0.4 * tsne_norm[i, 1]
+                color_rgb = mcolors.hsv_to_rgb((hue, saturation, value))
+                rgb_map.append(color_rgb)
+        else:
+            from sklearn.decomposition import PCA
+            pca = PCA(n_components=3)
+            pca_proj = pca.fit_transform(description_embeddings)
+            pca_min = pca_proj.min(axis=0)
+            pca_max = pca_proj.max(axis=0)
+            norm = (pca_proj - pca_min) / (pca_max - pca_min + 1e-8)
+            rgb_map = norm.tolist()
+
+        rgb_map = np.array(rgb_map)
+        desc_color_map = {i: rgb_map[i] for i in range(len(rgb_map))}
+        return rgb_map, desc_color_map
+
+
+    def plot_grid(self, iteration, show_neighbourhoods):
+        """Plot the current state of the grid with agent types shown by colour.
+        If show_neighbourhoods=True, overlay neighbourhood sectors for visualization.
+        """
         img = np.ones((self.grid_size, self.grid_size, 3))
         for i in range(self.grid_size):
             for j in range(self.grid_size):
                 agent = self.grid[i, j]
                 if agent:
                     img[i, j] = self._get_rgb(agent.desc_idx)
-        plt.imshow(img)
+
+        plt.figure(figsize=(6, 6))
+        if show_neighbourhoods:
+            # build neighbourhood map for background overlay
+            neigh_map = np.zeros((self.grid_size, self.grid_size), dtype=int)
+            for (i, j), nid in self.cell_to_neighbourhood.items():
+                neigh_map[i, j] = nid
+            cmap = plt.cm.get_cmap('tab20', self.num_neighbourhoods)
+            plt.imshow(neigh_map, cmap=cmap, alpha=0.12, interpolation='nearest')
+        plt.imshow(img, interpolation='nearest')
         plt.title(f"Iteration {iteration}")
         plt.axis('off')
 
-        # Create legend patches
+        # Create legend patches for agent types
         legend_patches = []
         for idx, color in self.desc_color_map.items():
-            label = f"{idx}: {self.desc_lookup[idx][:40]}..."  # First 40 chars
+            label = f"{idx}: {self.desc_lookup[idx][:40]}..."
             patch = mpatches.Patch(color=color, label=label)
             legend_patches.append(patch)
 
-        # Add the legend to the side
-        #plt.legend(handles=legend_patches, bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
-        # Add the legend below the plot
         plt.legend(handles=legend_patches,
                    loc='upper center',
                    bbox_to_anchor=(0.5, -0.05),
                    fancybox=True,
                    shadow=True,
                    ncol=1)
-                   #ncol=1 if len(legend_patches) < 4 else 2)
-        plt.subplots_adjust(bottom=0.3)  # Adjust bottom margin to fit the full legend
+        plt.subplots_adjust(bottom=0.3)
         plt.show()
 
     def plot_happiness(self, return_fig=False):
@@ -234,16 +294,23 @@ class SchellingModel:
                     agent.happy = False
                     # Move unhappy agent to a random empty cell
                     self.grid[agent.pos] = None
+                    old_nid = agent.neighbourhood
                     self.empty_cells.append(agent.pos)
                     new_pos = random.choice(self.empty_cells)
                     self.empty_cells.remove(new_pos)
                     agent.pos = new_pos
                     self.grid[new_pos] = agent
+                    # update neighbourhood membership
+                    new_nid = self.get_neighbourhood(new_pos)
+                    if old_nid is not None:
+                        self.neighbourhood_agents.get(old_nid, set()).discard(agent)
+                    agent.neighbourhood = new_nid
+                    self.neighbourhood_agents.setdefault(new_nid, set()).add(agent)
 
             self.happy_counts.append(happy)
             print(f"Iteration {it}: {happy} happy agents")
             if do_plots:
-                self.plot_grid(it)
+                self.plot_grid(it, show_neighbourhoods=True)
 
 # -------------------------------
 # Main Execution
@@ -256,6 +323,7 @@ if __name__ == "__main__":
                            num_agents=300,
                            similarity_threshold=0.65,
                            max_iters=50,
+                           num_neighbourhoods=8,
                            color_method="pca")
     model.run(do_plots=True)
     model.plot_happiness(return_fig=False)
