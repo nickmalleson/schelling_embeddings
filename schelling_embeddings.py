@@ -17,10 +17,15 @@ import matplotlib.pyplot as plt
 import math
 import random
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 import matplotlib.colors as mcolors
-from sentence_transformers import SentenceTransformer
 import matplotlib.patches as mpatches
+
+# Import the sentence transformer model for embeddings.
+# NOTE: the huggingface-cli command needs to be used to authenticate with huggingface locally.
+# Try huggingface-cli logout, then huggingface-cli login, using a token from https://huggingface.co/settings/tokens
+from sentence_transformers import SentenceTransformer
 
 # -------------------------------
 # Household Descriptions.
@@ -95,7 +100,9 @@ class SchellingModel:
 
         # Neighbourhood configuration
         self.num_neighbourhoods = num_neighbourhoods
-        # Links between cells and neighbourhoods _init_neighbourhoods
+        # Links between cells and neighbourhoods (populate in _init_neighbourhoods)
+        # neighbourhood_cells stores _list_ of cells because these are static.
+        # neighbourhood_agents stores _set_ of agents because these change dynamically.
         self.cell_to_neighbourhood = {}
         self.neighbourhood_cells = {i: [] for i in range(self.num_neighbourhoods)}
         self.neighbourhood_agents = {i: set() for i in range(self.num_neighbourhoods)}
@@ -136,19 +143,30 @@ class SchellingModel:
             self.agents.append(agent)
 
     def _init_neighbourhoods(self):
-        """Partition the grid into `num_neighbourhoods` radial sectors around the grid centre."""
+        """Partition the grid into `num_neighbourhoods` rectangular blocks."""
         n = self.num_neighbourhoods
-        mid = (self.grid_size - 1) / 2.0
-        two_pi = 2 * math.pi
-        # assign each cell a sector id
-        for i in range(self.grid_size):
-            for j in range(self.grid_size):
-                # angle where rows (i) are y and cols (j) are x
-                angle = math.atan2(i - mid, j - mid)  # range [-pi, pi]
-                if angle < 0:
-                    angle += two_pi
-                sector = int(angle / (two_pi / n))
-                sector = min(sector, n - 1)
+        g = self.grid_size
+
+        # Choose rows/cols close to a square layout
+        nrows = int(math.floor(math.sqrt(n))) or 1
+        ncols = math.ceil(n / nrows)
+
+        # Block size (ceiling so every cell is covered)
+        block_h = math.ceil(g / nrows)
+        block_w = math.ceil(g / ncols)
+
+        # Reset mappings and lists
+        self.cell_to_neighbourhood = {}
+        self.neighbourhood_cells = {i: [] for i in range(n)}
+
+        for i in range(g):
+            for j in range(g):
+                row_block = min(i // block_h, nrows - 1)
+                col_block = min(j // block_w, ncols - 1)
+                sector = row_block * ncols + col_block
+                # Clamp to ensure exactly `n` neighbourhood ids
+                if sector >= n:
+                    sector = n - 1
                 self.cell_to_neighbourhood[(i, j)] = sector
                 self.neighbourhood_cells.setdefault(sector, []).append((i, j))
 
@@ -215,7 +233,6 @@ class SchellingModel:
                 color_rgb = mcolors.hsv_to_rgb((hue, saturation, value))
                 rgb_map.append(color_rgb)
         else:
-            from sklearn.decomposition import PCA
             pca = PCA(n_components=3)
             pca_proj = pca.fit_transform(description_embeddings)
             pca_min = pca_proj.min(axis=0)
@@ -227,11 +244,13 @@ class SchellingModel:
         desc_color_map = {i: rgb_map[i] for i in range(len(rgb_map))}
         return rgb_map, desc_color_map
 
-
+    # python
     def plot_grid(self, iteration, show_neighbourhoods):
-        """Plot the current state of the grid with agent types shown by colour.
-        If show_neighbourhoods=True, overlay neighbourhood sectors for visualization.
+        """Plot grid side-by-side:
+        - left: cell colours (agents) with neighbourhood boundaries
+        - right: neighbourhood colours with neighbourhood boundaries
         """
+        # build agent image
         img = np.ones((self.grid_size, self.grid_size, 3))
         for i in range(self.grid_size):
             for j in range(self.grid_size):
@@ -239,32 +258,74 @@ class SchellingModel:
                 if agent:
                     img[i, j] = self._get_rgb(agent.desc_idx)
 
-        plt.figure(figsize=(6, 6))
-        if show_neighbourhoods:
-            # build neighbourhood map for background overlay
-            neigh_map = np.zeros((self.grid_size, self.grid_size), dtype=int)
-            for (i, j), nid in self.cell_to_neighbourhood.items():
-                neigh_map[i, j] = nid
-            cmap = plt.cm.get_cmap('tab20', self.num_neighbourhoods)
-            plt.imshow(neigh_map, cmap=cmap, alpha=0.12, interpolation='nearest')
-        plt.imshow(img, interpolation='nearest')
-        plt.title(f"Iteration {iteration}")
-        plt.axis('off')
+        # prepare figure with two subplots
+        fig, axs = plt.subplots(1, 2, figsize=(12, 6))
+        ax_left, ax_right = axs
 
-        # Create legend patches for agent types
+        # left: agents image
+        ax_left.imshow(img, interpolation='nearest', origin='upper')
+        ax_left.set_title(f"Iteration {iteration} — Cells")
+        ax_left.axis('off')
+
+        # build neighbourhood map once
+        neigh_map = np.zeros((self.grid_size, self.grid_size), dtype=int)
+        for (i, j), nid in self.cell_to_neighbourhood.items():
+            neigh_map[i, j] = nid
+
+        # right: neighbourhood colours
+        # TODO: calculate PCA colour from average embedding of agents in the neighbourhood
+        cmap = plt.cm.get_cmap('tab20', max(1, self.num_neighbourhoods))
+        im = ax_right.imshow(
+            neigh_map,
+            cmap=cmap,
+            interpolation='nearest',
+            origin='upper',
+            vmin=0,
+            vmax=max(0, self.num_neighbourhoods - 1),
+        )
+        ax_right.set_title(f"Iteration {iteration} — Neighbourhoods")
+        ax_right.axis('off')
+
+        if show_neighbourhoods:
+            # draw one rectangle boundary per neighbourhood on both axes
+            for nid in range(self.num_neighbourhoods):
+                cells = self.neighbourhood_cells.get(nid, [])
+                if not cells:
+                    continue
+                rows = [c[0] for c in cells]
+                cols = [c[1] for c in cells]
+                min_i, max_i = min(rows), max(rows)
+                min_j, max_j = min(cols), max(cols)
+
+                rect = mpatches.Rectangle(
+                    (min_j - 0.5, min_i - 0.5),  # x, y
+                    width=(max_j - min_j + 1),
+                    height=(max_i - min_i + 1),
+                    fill=False,
+                    edgecolor='k',
+                    linewidth=1.5,
+                    zorder=3,
+                )
+                # add same rectangle to both axes
+                ax_left.add_patch(mpatches.Rectangle(rect.get_xy(), rect.get_width(), rect.get_height(),
+                                                     fill=False, edgecolor='k', linewidth=1.5, zorder=3))
+                ax_right.add_patch(mpatches.Rectangle(rect.get_xy(), rect.get_width(), rect.get_height(),
+                                                      fill=False, edgecolor='k', linewidth=1.5, zorder=3))
+
+        # Create legend patches for agent types and place as figure legend
         legend_patches = []
         for idx, color in self.desc_color_map.items():
             label = f"{idx}: {self.desc_lookup[idx][:40]}..."
             patch = mpatches.Patch(color=color, label=label)
             legend_patches.append(patch)
 
-        plt.legend(handles=legend_patches,
+        fig.legend(handles=legend_patches,
                    loc='upper center',
                    bbox_to_anchor=(0.5, -0.05),
                    fancybox=True,
                    shadow=True,
                    ncol=1)
-        plt.subplots_adjust(bottom=0.3)
+        plt.subplots_adjust(bottom=0.25, wspace=0.12)
         plt.show()
 
     def plot_happiness(self, return_fig=False):
