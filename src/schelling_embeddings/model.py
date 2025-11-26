@@ -25,7 +25,7 @@ import matplotlib.patches as mpatches
 # Import the sentence transformer model for embeddings.
 # NOTE: the huggingface-cli command needs to be used to authenticate with huggingface locally.
 # Try huggingface-cli logout, then huggingface-cli login, using a token from https://huggingface.co/settings/tokens
-from src.schelling_embeddings.core import EmbeddingModel, Agent
+from src.schelling_embeddings.core import EmbeddingModel, Agent, Neighbourhood
 
 # -------------------------------
 # Household Descriptions.
@@ -73,12 +73,11 @@ class SchellingModel:
 
         # Neighbourhood configuration
         self.num_neighbourhoods = num_neighbourhoods
-        # Links between cells and neighbourhoods (populate in _init_neighbourhoods)
+        # Links between cells and neighbourhoods (populated in _init_neighbourhoods)
         # neighbourhood_cells stores _list_ of cells because these are static.
         # neighbourhood_agents stores _set_ of agents because these change dynamically.
+        self.neighbourhoods = {i: Neighbourhood(i) for i in range(self.num_neighbourhoods)}
         self.cell_to_neighbourhood = {}
-        self.neighbourhood_cells = {i: [] for i in range(self.num_neighbourhoods)}
-        self.neighbourhood_agents = {i: set() for i in range(self.num_neighbourhoods)}
         self._init_neighbourhoods()
 
         # Calculate the embeddings for the household descriptions
@@ -106,14 +105,29 @@ class SchellingModel:
             desc_idx = random.randint(0, len(self.descriptions) - 1)
             embedding = self.description_embeddings[desc_idx]
             nid = self.get_neighbourhood(pos)
+            neighbourhood_obj = self.neighbourhoods.get(nid)
             # Create the agent
-            agent = Agent(desc_idx, embedding, pos, nid)
+            agent = Agent(desc_idx, embedding, pos, neighbourhood_obj)
             # place on grid
             self.grid[pos] = agent
-            # add to neighbourhood agent list
-            self.neighbourhood_agents.setdefault(nid, set()).add(agent)
-
+            neighbourhood_obj.add_agent(agent)
             self.agents.append(agent)
+
+    # TODO: remove get_neighbours and use neighbourhoods instead
+    def _get_neighbours(self, pos):
+        """Return non-empty neighbouring agents in the Moore neighbourhood."""
+        x, y = pos
+        neighbours = []
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                if dx == 0 and dy == 0:
+                    continue
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < self.grid_size and 0 <= ny < self.grid_size:
+                    neighbour = self.grid[nx, ny]
+                    if neighbour is not None:
+                        neighbours.append(neighbour)
+        return neighbours
 
     def _init_neighbourhoods(self):
         """Partition the grid into `num_neighbourhoods` rectangular blocks."""
@@ -130,18 +144,17 @@ class SchellingModel:
 
         # Reset mappings and lists
         self.cell_to_neighbourhood = {}
-        self.neighbourhood_cells = {i: [] for i in range(n)}
+        self.neighbourhoods = {i: Neighbourhood(i) for i in range(n)}
 
         for i in range(g):
             for j in range(g):
                 row_block = min(i // block_h, nrows - 1)
                 col_block = min(j // block_w, ncols - 1)
                 sector = row_block * ncols + col_block
-                # Clamp to ensure exactly `n` neighbourhood ids
                 if sector >= n:
                     sector = n - 1
                 self.cell_to_neighbourhood[(i, j)] = sector
-                self.neighbourhood_cells.setdefault(sector, []).append((i, j))
+                self.neighbourhoods[sector].add_cell((i, j))
 
     def get_neighbourhood(self, pos):
         """Return neighbourhood id for a given position tuple (i, j)."""
@@ -149,26 +162,11 @@ class SchellingModel:
 
     def get_neighbourhood_cells(self, neighbourhood_id):
         """Return list of positions in the neighbourhood."""
-        return list(self.neighbourhood_cells.get(neighbourhood_id, []))
+        return self.neighbourhoods.get(neighbourhood_id).get_cells()
 
     def get_neighbourhood_agents(self, neighbourhood_id):
         """Return list of Agent objects currently in the neighbourhood."""
-        return list(self.neighbourhood_agents.get(neighbourhood_id, set()))
-
-    def _get_neighbours(self, pos):
-        """Return non-empty neighbouring agents in the Moore neighbourhood."""
-        x, y = pos
-        neighbours = []
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
-                if dx == 0 and dy == 0:
-                    continue
-                nx, ny = x + dx, y + dy
-                if 0 <= nx < self.grid_size and 0 <= ny < self.grid_size:
-                    neighbour = self.grid[nx, ny]
-                    if neighbour is not None:
-                        neighbours.append(neighbour)
-        return neighbours
+        return self.neighbourhoods.get(neighbourhood_id).get_agents()
 
     def _compute_similarity(self, agent, neighbours):
         """Compute average cosine similarity between agent and neighbours."""
@@ -247,7 +245,7 @@ class SchellingModel:
 
         # right: neighbourhood colours
         # TODO: calculate PCA colour from average embedding of agents in the neighbourhood
-        cmap = plt.cm.get_cmap('tab20', max(1, self.num_neighbourhoods))
+        cmap = plt.colormaps['tab20'].resampled(max(1, self.num_neighbourhoods))
         im = ax_right.imshow(
             neigh_map,
             cmap=cmap,
@@ -260,18 +258,13 @@ class SchellingModel:
         ax_right.axis('off')
 
         if show_neighbourhoods:
-            # draw one rectangle boundary per neighbourhood on both axes
-            for nid in range(self.num_neighbourhoods):
-                cells = self.neighbourhood_cells.get(nid, [])
-                if not cells:
+            for nid, neighbourhood in self.neighbourhoods.items():
+                bounds = neighbourhood.bounds()
+                if bounds is None:
                     continue
-                rows = [c[0] for c in cells]
-                cols = [c[1] for c in cells]
-                min_i, max_i = min(rows), max(rows)
-                min_j, max_j = min(cols), max(cols)
-
+                min_i, max_i, min_j, max_j = bounds
                 rect = mpatches.Rectangle(
-                    (min_j - 0.5, min_i - 0.5),  # x, y
+                    (min_j - 0.5, min_i - 0.5),
                     width=(max_j - min_j + 1),
                     height=(max_i - min_i + 1),
                     fill=False,
@@ -279,11 +272,11 @@ class SchellingModel:
                     linewidth=1.5,
                     zorder=3,
                 )
-                # add same rectangle to both axes
                 ax_left.add_patch(mpatches.Rectangle(rect.get_xy(), rect.get_width(), rect.get_height(),
                                                      fill=False, edgecolor='k', linewidth=1.5, zorder=3))
                 ax_right.add_patch(mpatches.Rectangle(rect.get_xy(), rect.get_width(), rect.get_height(),
                                                       fill=False, edgecolor='k', linewidth=1.5, zorder=3))
+
 
         # Create legend patches for agent types and place as figure legend
         legend_patches = []
@@ -328,18 +321,20 @@ class SchellingModel:
                     agent.happy = False
                     # Move unhappy agent to a random empty cell
                     self.grid[agent.pos] = None
-                    old_nid = agent.neighbourhood
+                    old_neigh = agent.neighbourhood
                     self.empty_cells.append(agent.pos)
                     new_pos = random.choice(self.empty_cells)
                     self.empty_cells.remove(new_pos)
                     agent.pos = new_pos
                     self.grid[new_pos] = agent
-                    # update neighbourhood membership
+                    # update neighbourhood membership using objects
                     new_nid = self.get_neighbourhood(new_pos)
-                    if old_nid is not None:
-                        self.neighbourhood_agents.get(old_nid, set()).discard(agent)
-                    agent.neighbourhood = new_nid
-                    self.neighbourhood_agents.setdefault(new_nid, set()).add(agent)
+                    new_neigh = self.neighbourhoods.get(new_nid)
+                    if old_neigh is not None:
+                        old_neigh.remove_agent(agent)
+                    agent.neighbourhood = new_neigh
+                    if new_neigh is not None:
+                        new_neigh.add_agent(agent)
 
             self.happy_counts.append(happy)
             print(f"Iteration {it}: {happy} happy agents")
