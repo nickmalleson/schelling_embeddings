@@ -25,7 +25,7 @@ import matplotlib.patches as mpatches
 # Import the sentence transformer model for embeddings.
 # NOTE: the huggingface-cli command needs to be used to authenticate with huggingface locally.
 # Try huggingface-cli logout, then huggingface-cli login, using a token from https://huggingface.co/settings/tokens
-from sentence_transformers import SentenceTransformer
+from src.schelling_embeddings.core import EmbeddingModel, Agent
 
 # -------------------------------
 # Household Descriptions.
@@ -42,33 +42,6 @@ household_descriptions = [
     "A single parent with three children, living in a council flat, surviving on a tight budget that includes Universal Credit and Child Tax Credits, and staunchly supporting the Labour party, particularly its more left-wing elements",
 ]
 
-# -------------------------------
-# Embedding Model
-# -------------------------------
-
-class EmbeddingModel:
-    """Handles encoding of text descriptions using a Hugging Face transformer model."""
-
-    def __init__(self, model_name="all-MiniLM-L6-v2"):
-        self.model = SentenceTransformer(model_name)
-
-    def encode(self, sentences):
-        embeddings = self.model.encode(sentences, convert_to_numpy=True)
-        return embeddings
-
-
-# -------------------------------
-# Agent Class
-# -------------------------------
-
-class Agent:
-    """Represents a household agent on the grid."""
-    def __init__(self, desc_idx, embedding, pos, neighbourhood):
-        self.desc_idx = desc_idx
-        self.embedding = embedding
-        self.pos = pos
-        self.happy = False
-        self.neighbourhood = neighbourhood
 
 # -------------------------------
 # Schelling Model Class
