@@ -259,22 +259,38 @@ class SchellingModel:
         ax_left.set_title(f"Iteration {iteration} — Cells")
         ax_left.axis('off')
 
-        # build neighbourhood map once
-        neigh_map = np.zeros((self.grid_size, self.grid_size), dtype=int)
-        for (i, j), nid in self.cell_to_neighbourhood.items():
-            neigh_map[i, j] = nid
-
         # right: neighbourhood colours
-        # TODO: calculate PCA colour from average embedding of agents in the neighbourhood
-        cmap = plt.colormaps['tab20'].resampled(max(1, self.num_neighbourhoods))
-        im = ax_right.imshow(
-            neigh_map,
-            cmap=cmap,
-            interpolation='nearest',
-            origin='upper',
-            vmin=0,
-            vmax=max(0, self.num_neighbourhoods - 1),
+
+        # Build neighbourhood embeddings matrix (one row per neighbourhood).
+        neigh_embeddings = np.vstack(
+            [np.asarray(neigh.neighbourhood_embedding) for neigh in self.neighbourhoods.values()]
         )
+
+        # Project neighbourhood embeddings to 3 components for RGB.
+        n_samples, n_features = neigh_embeddings.shape
+        n_comp = min(3, n_samples, n_features)
+        if n_comp >= 1 and n_samples > 0:
+            pca = PCA(n_components=n_comp)
+            proj = pca.fit_transform(neigh_embeddings)  # (n_neigh, n_comp)
+            # If fewer than 3 components, pad with zeros to get 3 channels
+            if n_comp < 3:
+                proj = np.hstack([proj, np.zeros((n_samples, 3 - n_comp))])
+            # Normalize each channel to 0-1
+            p_min = proj.min(axis=0)
+            p_max = proj.max(axis=0)
+            denom = (p_max - p_min) + 1e-8
+            rgb_neigh = (proj - p_min) / denom
+        else:
+            # fallback single grey colour per neighbourhood
+            rgb_neigh = np.tile(np.array([[0.6, 0.6, 0.6]]), (self.num_neighbourhoods, 1))
+
+        # Build RGB image for neighbourhoods using the rgb_neigh mapping
+        neigh_img = np.zeros((self.grid_size, self.grid_size, 3))
+        for (i, j), nid in self.cell_to_neighbourhood.items():
+            neigh_img[i, j] = rgb_neigh[nid]
+
+        # right: neighbourhood colours (from neighbourhood embeddings)
+        ax_right.imshow(neigh_img, interpolation='nearest', origin='upper')
         ax_right.set_title(f"Iteration {iteration} — Neighbourhoods")
         ax_right.axis('off')
 
