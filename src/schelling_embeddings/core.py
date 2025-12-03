@@ -1,6 +1,8 @@
 from sentence_transformers import SentenceTransformer
+import numpy as np
 
 import random
+import warnings
 
 # -------------------------------
 # Embedding Model
@@ -32,8 +34,23 @@ class Agent:
         self.neighbourhood = neighbourhood
 
     def step(self, model):
-        neighbours = model._get_neighbours(self.pos)
-        sim = model._compute_similarity(self, neighbours)
+        # Compute similarity
+        sim = None
+        if model.move_decision == "neighbours":
+            # Move decision based on surrounding neighbours
+            neighbours = model._get_neighbours(self.pos)
+            if not neighbours:
+                warnings.warn(f"Agent at {self.pos} has no neighbours")
+                sim = 1.0
+            else:
+                sim = model._compute_similarity(self, neighbours)
+        elif model.move_decision == "neighbourhood":
+            # Move decision based on neighbourhood embedding
+            sim = model._compute_similarity(self, self.neighbourhood)
+
+        else:
+            raise ValueError(f"Unknown move decision method: {model.move_decision}")
+
         if sim >= model.similarity_threshold:
             self.happy = True
         else:
@@ -63,10 +80,12 @@ class Agent:
 
 class Neighbourhood:
     """Represents a rectangular neighbourhood block on the grid."""
-    def __init__(self, nid):
+    def __init__(self, nid, model):
         self.id = nid
+        self.model = model
         self.cells = []          # list of (i, j) tuples
         self.agents = set()      # set of Agent objects
+        self.neighbourhood_embedding = None
 
     def add_cell(self, pos):
         self.cells.append(pos)
@@ -91,9 +110,18 @@ class Neighbourhood:
         cols = [c[1] for c in self.cells]
         return (min(rows), max(rows), min(cols), max(cols))
 
-    def mean_embedding(self):
-        """Return mean embedding of agents in the neighbourhood or None if empty."""
+    def _mean_embedding(self):
+        """Return mean embedding of agents in the neighbourhood or the average
+        population embedding if empty."""
         if not self.agents:
-            return None
+            warnings.warn(f"No agents in neighbourhood found in {self.id}, "
+                          f"returning average embedding.")
+            return np.mean(np.array([a.embedding for a in self.agents]), axis=0)
+
         embs = np.array([a.embedding for a in self.agents])
         return np.mean(embs, axis=0)
+
+    def step(self):
+        self.neighbourhood_embedding = self._mean_embedding()
+
+

@@ -21,6 +21,8 @@ from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
+from collections.abc import Iterable
+
 
 # Import the sentence transformer model for embeddings.
 # NOTE: the huggingface-cli command needs to be used to authenticate with huggingface locally.
@@ -57,7 +59,10 @@ class SchellingModel:
                  similarity_threshold=0.85,
                  max_iters=20,
                  num_neighbourhoods=8,
-                 color_method="tsne"):
+                 color_method="tsne",
+                 do_plots=True,
+                 move_decision="neighbours"):
+
         # Descriptions of the generic households
         self.descriptions = descriptions
 
@@ -65,18 +70,24 @@ class SchellingModel:
         self.grid_size = grid_size
         self.grid = np.full((grid_size, grid_size), None)
         self.num_agents = num_agents
-        self.similarity_threshold = similarity_threshold
         self.max_iters = max_iters
         self.empty_cells = [(i, j) for i in range(grid_size) for j in range(grid_size)]
         self.agents = []
         self.happy_counts = []
+
+        # Agent's decision on whether to move
+        self.similarity_threshold = similarity_threshold
+        valid_move_decisions = ["neighbours", "neighbourhood"]
+        if move_decision not in valid_move_decisions:
+            raise ValueError(f"move_decision must be one of {valid_move_decisions}")
+        self.move_decision = move_decision
 
         # Neighbourhood configuration
         self.num_neighbourhoods = num_neighbourhoods
         # Links between cells and neighbourhoods (populated in _init_neighbourhoods)
         # neighbourhood_cells stores _list_ of cells because these are static.
         # neighbourhood_agents stores _set_ of agents because these change dynamically.
-        self.neighbourhoods = {i: Neighbourhood(i) for i in range(self.num_neighbourhoods)}
+        self.neighbourhoods = {i: Neighbourhood(i, self) for i in range(self.num_neighbourhoods)}
         self.cell_to_neighbourhood = {}
         self._init_neighbourhoods()
 
@@ -87,8 +98,9 @@ class SchellingModel:
         self.desc_lookup = {i: desc for i, desc in enumerate(self.descriptions)}
 
         # ------------------------
-        # COLOR MAPPING USING PCA or t-SNE (t-distributed Stochastic Neighbor Embedding)
+        # Plots and COLOR MAPPING USING PCA or t-SNE (t-distributed Stochastic Neighbor Embedding)
         # ------------------------
+        self.do_plots = do_plots
         (self.rgb_map, self.desc_color_map) = SchellingModel._init_colours(
             color_method, self.description_embeddings)
 
@@ -142,10 +154,7 @@ class SchellingModel:
         block_h = math.ceil(g / nrows)
         block_w = math.ceil(g / ncols)
 
-        # Reset mappings and lists
-        self.cell_to_neighbourhood = {}
-        self.neighbourhoods = {i: Neighbourhood(i) for i in range(n)}
-
+        # Create neighbourhoods and map cells to neighbourhood ids
         for i in range(g):
             for j in range(g):
                 row_block = min(i // block_h, nrows - 1)
@@ -169,15 +178,27 @@ class SchellingModel:
         return self.neighbourhoods.get(neighbourhood_id).get_agents()
 
     def _compute_similarity(self, agent, neighbours):
-        """Compute average cosine similarity between agent and neighbours."""
-        if not neighbours:
-            return 0
-        # Put the neighbour's embeddings into a matrix
-        emb_matrix = np.array([n.embedding for n in neighbours])
-        # Calculate the cosine similarities between the agent and all neighbours
-        sims = cosine_similarity([agent.embedding], emb_matrix)
-        # Return the mean similarity
-        return np.mean(sims)
+        """Compute average cosine similarity between agent and neighbours, or an agent and its neighbourhood.
+
+        neighbours: list of Agent objects OR a single neighbourhood object (nothing else)
+        """
+        if isinstance(neighbours, Neighbourhood):
+            # single neighbourhood
+            return cosine_similarity([agent.embedding], [neighbours.neighbourhood_embedding])
+
+        elif isinstance(neighbours, Iterable) and not isinstance(neighbours, (str, bytes)):
+            # list (or iterable) of agents (but not strings, which are also iterable)
+            if not neighbours:
+                raise ValueError(f"Cannot compute similarity with empty neighbours list.")
+            # Put the neighbour's embeddings into a matrix
+            emb_matrix = np.array([n.embedding for n in neighbours])
+            # Calculate the cosine similarities between the agent and all neighbours
+            sims = cosine_similarity([agent.embedding], emb_matrix)
+            # Return the mean similarity
+            return np.mean(sims)
+
+        raise ValueError(f"neighbours parameter must be either a Neighbourhood object or an "
+                         f"iterable of Agent objects. Not {type(neighbours)}.")
 
     def _get_rgb(self, desc_idx):
         """Return RGB colour (0–1 range) for a description index via PCA projection."""
@@ -313,25 +334,31 @@ class SchellingModel:
         it: iteration number
         do_plots: whether to plot the grid after the step
         """
+
+        # Calculate the new neighbourhood embeddings
+        for neighbourhood in self.neighbourhoods.values():
+            neighbourhood.step()
+
+        # Step the agents
         happy = 0
         for agent in self.agents:
             agent.step(self)
             if agent.happy:
                 happy += 1
 
-
-
         self.happy_counts.append(happy)
 
 
 
-    def run(self, do_plots=True):
+    def run(self):
         """Run the full simulation for the configured number of iterations."""
         for it in range(self.max_iters):
             self.step(it)
             print(f"Iteration {it} complete. {self.happy_counts[-1]} happy agents")
-            if do_plots:
+            if self.do_plots:
                 self.plot_grid(it, show_neighbourhoods=True)
+
+
 # -------------------------------
 # Main Execution
 # -------------------------------
@@ -341,9 +368,12 @@ if __name__ == "__main__":
     model = SchellingModel(household_descriptions,
                            grid_size=20,
                            num_agents=300,
-                           similarity_threshold=0.65,
+                           similarity_threshold=0.70,
                            max_iters=50,
                            num_neighbourhoods=8,
-                           color_method="pca")
-    model.run(do_plots=True)
+                           color_method="pca",
+                           do_plots=True,
+                           #move_decision="neighbours")
+                           move_decision = "neighbourhood")
+    model.run()
     model.plot_happiness(return_fig=False)
