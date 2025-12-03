@@ -307,40 +307,31 @@ class SchellingModel:
         else:
             plt.show()
 
+    def step(self, it):
+        """Perform a single iteration of the simulation.
+
+        it: iteration number
+        do_plots: whether to plot the grid after the step
+        """
+        happy = 0
+        for agent in self.agents:
+            agent.step(self)
+            if agent.happy:
+                happy += 1
+
+
+
+        self.happy_counts.append(happy)
+
+
+
     def run(self, do_plots=True):
         """Run the full simulation for the configured number of iterations."""
         for it in range(self.max_iters):
-            happy = 0
-            for agent in self.agents:
-                neighbours = self._get_neighbours(agent.pos)
-                sim = self._compute_similarity(agent, neighbours)
-                if sim >= self.similarity_threshold:
-                    agent.happy = True
-                    happy += 1
-                else:
-                    agent.happy = False
-                    # Move unhappy agent to a random empty cell
-                    self.grid[agent.pos] = None
-                    old_neigh = agent.neighbourhood
-                    self.empty_cells.append(agent.pos)
-                    new_pos = random.choice(self.empty_cells)
-                    self.empty_cells.remove(new_pos)
-                    agent.pos = new_pos
-                    self.grid[new_pos] = agent
-                    # update neighbourhood membership using objects
-                    new_nid = self.get_neighbourhood(new_pos)
-                    new_neigh = self.neighbourhoods.get(new_nid)
-                    if old_neigh is not None:
-                        old_neigh.remove_agent(agent)
-                    agent.neighbourhood = new_neigh
-                    if new_neigh is not None:
-                        new_neigh.add_agent(agent)
-
-            self.happy_counts.append(happy)
-            print(f"Iteration {it}: {happy} happy agents")
+            self.step(it)
+            print(f"Iteration {it} complete. {self.happy_counts[-1]} happy agents")
             if do_plots:
                 self.plot_grid(it, show_neighbourhoods=True)
-
 # -------------------------------
 # Main Execution
 # -------------------------------

@@ -1,5 +1,7 @@
 from sentence_transformers import SentenceTransformer
 
+import random
+
 # -------------------------------
 # Embedding Model
 # Used to calculate the embeddings from the sentences
@@ -29,6 +31,29 @@ class Agent:
         self.happy = False
         self.neighbourhood = neighbourhood
 
+    def step(self, model):
+        neighbours = model._get_neighbours(self.pos)
+        sim = model._compute_similarity(self, neighbours)
+        if sim >= model.similarity_threshold:
+            self.happy = True
+        else:
+            self.happy = False
+            # Move unhappy agent to a random empty cell
+            model.grid[self.pos] = None
+            old_neigh = self.neighbourhood
+            model.empty_cells.append(self.pos)
+            new_pos = random.choice(model.empty_cells)
+            model.empty_cells.remove(new_pos)
+            self.pos = new_pos
+            model.grid[new_pos] = self
+            # update neighbourhood membership using objects
+            new_nid = model.get_neighbourhood(new_pos)
+            new_neigh = model.neighbourhoods.get(new_nid)
+            if old_neigh is not None:
+                old_neigh.remove_agent(self)
+            self.neighbourhood = new_neigh
+            if new_neigh is not None:
+                new_neigh.add_agent(self)
 
 
 # -------------------------------
