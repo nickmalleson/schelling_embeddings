@@ -18,8 +18,6 @@ import math
 import random
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
-import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
 from collections.abc import Iterable
 
@@ -59,7 +57,6 @@ class SchellingModel:
                  similarity_threshold=0.85,
                  max_iters=20,
                  num_neighbourhoods=8,
-                 color_method="tsne",
                  do_plots=True,
                  move_decision="neighbours"):
 
@@ -98,11 +95,12 @@ class SchellingModel:
         self.desc_lookup = {i: desc for i, desc in enumerate(self.descriptions)}
 
         # ------------------------
-        # Plots and COLOR MAPPING USING PCA or t-SNE (t-distributed Stochastic Neighbor Embedding)
+        # Plots and COLOR MAPPING USING PCA
         # ------------------------
         self.do_plots = do_plots
-        (self.rgb_map, self.desc_color_map) = SchellingModel._init_colours(
-            color_method, self.description_embeddings)
+        (self.rgb_map, self.desc_color_map, self.pca, self.pca_min, self.pca_max) = SchellingModel._init_colours(
+            self.description_embeddings
+        )
 
         # Initialize the grid with agents
         self._init_agents()
@@ -207,34 +205,18 @@ class SchellingModel:
         return scaled
 
     @classmethod
-    def _init_colours(cls, color_method, description_embeddings):
-        """Initialize colour mapping for descriptions using t-SNE or PCA."""
-        if color_method == "tsne":
-            perplexity = min(5, len(description_embeddings) - 1)
-            tsne_map = TSNE(n_components=2, perplexity=perplexity, random_state=42).fit_transform(
-                description_embeddings
-            )
-            t_min = tsne_map.min(axis=0)
-            t_max = tsne_map.max(axis=0)
-            tsne_norm = (tsne_map - t_min) / (t_max - t_min + 1e-8)
-            rgb_map = []
-            for i in range(len(tsne_norm)):
-                hue = tsne_norm[i, 0]
-                saturation = 0.8
-                value = 0.9 - 0.4 * tsne_norm[i, 1]
-                color_rgb = mcolors.hsv_to_rgb((hue, saturation, value))
-                rgb_map.append(color_rgb)
-        else:
-            pca = PCA(n_components=3)
-            pca_proj = pca.fit_transform(description_embeddings)
-            pca_min = pca_proj.min(axis=0)
-            pca_max = pca_proj.max(axis=0)
-            norm = (pca_proj - pca_min) / (pca_max - pca_min + 1e-8)
-            rgb_map = norm.tolist()
+    def _init_colours(cls, description_embeddings):
+        """Initialize colour mapping for descriptions using PCA."""
+        pca = PCA(n_components=3)
+        pca_proj = pca.fit_transform(description_embeddings)
+        pca_min = pca_proj.min(axis=0)
+        pca_max = pca_proj.max(axis=0)
+        norm = (pca_proj - pca_min) / (pca_max - pca_min + 1e-8)
+        rgb_map = norm.tolist()
 
         rgb_map = np.array(rgb_map)
         desc_color_map = {i: rgb_map[i] for i in range(len(rgb_map))}
-        return rgb_map, desc_color_map
+        return rgb_map, desc_color_map, pca, pca_min, pca_max
 
     # python
     def plot_grid(self, iteration, show_neighbourhoods):
@@ -262,26 +244,28 @@ class SchellingModel:
         # right: neighbourhood colours
 
         # Build neighbourhood embeddings matrix (one row per neighbourhood).
+        # (making sure they are in order of neighbourhood id)
         neigh_embeddings = np.vstack(
-            [np.asarray(neigh.neighbourhood_embedding) for neigh in self.neighbourhoods.values()]
+            [np.asarray(self.neighbourhoods[i].neighbourhood_embedding) for i in range(len(self.neighbourhoods))]
         )
 
-        # Project neighbourhood embeddings to 3 components for RGB.
-        n_samples, n_features = neigh_embeddings.shape
-        n_comp = min(3, n_samples, n_features)
-        if n_comp >= 1 and n_samples > 0:
-            pca = PCA(n_components=n_comp)
-            proj = pca.fit_transform(neigh_embeddings)  # (n_neigh, n_comp)
-            # If fewer than 3 components, pad with zeros to get 3 channels
-            if n_comp < 3:
-                proj = np.hstack([proj, np.zeros((n_samples, 3 - n_comp))])
-            # Normalize each channel to 0-1
-            p_min = proj.min(axis=0)
-            p_max = proj.max(axis=0)
-            denom = (p_max - p_min) + 1e-8
-            rgb_neigh = (proj - p_min) / denom
+        # Project neighbourhood embeddings to 3 components for RGB, using the PCA fit calculated
+        # from the agent descriptions when they are initialised
+        # neigh_embeddings shape: (n_neigh, n_features)
+        if neigh_embeddings.size > 0:
+            proj = self.pca.transform(neigh_embeddings)  # (n_neigh, 3) if PCA was fitted with n_components=3
+
+            # if PCA was fitted with fewer than 3 components (unlikely here), pad to 3
+            if proj.shape[1] < 3:
+                proj = np.hstack([proj, np.zeros((proj.shape[0], 3 - proj.shape[1]))])
+
+            # Reuse the SAME min/max that were used for agent colours
+            # (self.pca_min, self.pca_max come from the fitted PCA on descriptions)
+            denom = (self.pca_max - self.pca_min) + 1e-8
+            rgb_neigh = (proj - self.pca_min) / denom
+            # clip to [0,1] to be safe
+            rgb_neigh = np.clip(rgb_neigh, 0.0, 1.0)
         else:
-            # fallback single grey colour per neighbourhood
             rgb_neigh = np.tile(np.array([[0.6, 0.6, 0.6]]), (self.num_neighbourhoods, 1))
 
         # Build RGB image for neighbourhoods using the rgb_neigh mapping
@@ -294,6 +278,7 @@ class SchellingModel:
         ax_right.set_title(f"Iteration {iteration} — Neighbourhoods")
         ax_right.axis('off')
 
+        # Overlay neighbourhood boundaries if requested
         if show_neighbourhoods:
             for nid, neighbourhood in self.neighbourhoods.items():
                 bounds = neighbourhood.bounds()
@@ -387,7 +372,6 @@ if __name__ == "__main__":
                            similarity_threshold=0.70,
                            max_iters=50,
                            num_neighbourhoods=8,
-                           color_method="pca",
                            do_plots=True,
                            #move_decision="neighbours")
                            move_decision = "neighbourhood")
